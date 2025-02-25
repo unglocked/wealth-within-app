@@ -88,40 +88,50 @@ const Journal = () => {
     try {
       if (currentUser) {
         const todayDate = getTodayDate();
+        const userDocRef = doc(db, `users/${currentUser.uid}`);
+        const userDoc = await getDoc(userDocRef);
+        
+        let newStreak = streak;
+        
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          const lastEntryDate = userData.lastEntryDate;
+          
+          if (lastEntryDate !== todayDate) {
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            const yesterdayDate = yesterday.toLocaleDateString('en-CA');
+  
+            if (lastEntryDate === yesterdayDate) {
+              newStreak += 1; // Increase streak if they journaled yesterday
+            } else {
+              newStreak = 1; // Reset streak if they missed a day
+            }
+          }
+        } else {
+          newStreak = 1; // First entry ever
+        }
+  
+        // Save journal entry
         const entryDocRef = doc(db, `users/${currentUser.uid}/entries`, prompt);
         await setDoc(entryDocRef, {
           entry,
           timestamp: new Date(),
         });
-
+  
+        // Update streak **only if it's the first entry of the day**
         if (!hasEntryToday) {
-          const userDoc = await getDoc(doc(db, `users/${currentUser.uid}`));
-          if (userDoc.exists()) {
-            const userData = userDoc.data();
-            const lastEntryDate = userData.lastEntryDate;
-            const yesterday = new Date();
-            yesterday.setDate(yesterday.getDate() - 1);
-            const yesterdayDate = yesterday.toLocaleDateString('en-CA');
-
-            if (lastEntryDate === yesterdayDate) {
-              setStreak(streak + 1);
-              setStreakWarning('');
-            } else {
-              setStreak(1); // Reset streak to 1 if they missed more than one day
-              setStreakWarning('');
-            }
-          } else {
-            setStreak(streak + 1);
-          }
-
-          setHasEntryToday(true);
-          await setDoc(doc(db, `users/${currentUser.uid}`), {
-            streak: streak + 1,
+          await setDoc(userDocRef, {
+            streak: newStreak,
             lastEntryDate: todayDate,
           }, { merge: true });
+  
+          setStreak(newStreak);
+          setHasEntryToday(true);
+          setStreakWarning('');
         }
-
-        alert('Entry saved successfully!'); // Replace with a toast notification later
+  
+        alert('Entry saved successfully!');
       }
     } catch (error) {
       console.error('Error:', error.message);
