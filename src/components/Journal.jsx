@@ -1,59 +1,88 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { getAuth } from 'firebase/auth';
-import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs, updateDoc } from 'firebase/firestore';
 import { AuthContext } from '../context/AuthContext';
 import { FaFire } from 'react-icons/fa';
-import './Journal.css';
+import './Journal.css'; // Import the CSS file
 
 const Journal = () => {
   const { currentUser } = useContext(AuthContext);
   const [prompt, setPrompt] = useState('');
+  const [category, setCategory] = useState(''); // Add category state
   const [entry, setEntry] = useState('');
   const [hasEntryToday, setHasEntryToday] = useState(false);
   const [streak, setStreak] = useState(0);
   const [streakWarning, setStreakWarning] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [pastEntries, setPastEntries] = useState([]);
+  const [activeTab, setActiveTab] = useState('Today’s Prompt');
   const db = getFirestore();
+  const [saveMessage, setSaveMessage] = useState('');
 
-  // Get today's date in YYYY-MM-DD format in the user's time zone
   const getTodayDate = () => {
     const today = new Date();
-    return today.toLocaleDateString('en-CA'); // 'en-CA' format is YYYY-MM-DD
+    return today.toLocaleDateString('en-CA');
   };
 
-  // Fetch daily prompt and user's entry
+  const fetchPastEntries = async () => {
+    try {
+      const entriesCollection = collection(db, `users/${currentUser.uid}/entries`);
+      const entriesSnapshot = await getDocs(entriesCollection);
+      const entriesList = entriesSnapshot.docs.map(doc => {
+        const data = doc.data();
+        const timestamp = data.timestamp ? data.timestamp.toDate() : null;
+        const formattedTimestamp = timestamp
+          ? `${timestamp.toLocaleDateString()} ${timestamp.toLocaleTimeString()}`
+          : 'No timestamp';
+
+        return {
+          id: doc.id,
+          ...data,
+          timestamp: formattedTimestamp,
+          isEditing: false, // Add isEditing state to each entry
+        };
+      });
+      setPastEntries(entriesList);
+    } catch (error) {
+      console.error('Error fetching past entries:', error);
+    }
+  };
+
   useEffect(() => {
     const fetchPromptAndEntry = async () => {
       setLoading(true);
       try {
         const promptDoc = await getDoc(doc(db, 'prompts', 'NHdNnSptRrnGvz4cW3sw'));
-        console.log('Prompt document:', promptDoc);
         if (promptDoc.exists()) {
           const promptData = promptDoc.data();
-          console.log('Prompt data:', promptData);
-          if (Array.isArray(promptData.prompts)) {
-            for (const p of promptData.prompts) {
-              const entryDoc = await getDoc(doc(db, `users/${currentUser.uid}/entries`, p));
-              if (!entryDoc.exists()) {
-                setPrompt(p);
-                break;
+          if (promptData.promptsWithCat) {
+            let foundPrompt = false;
+            for (const [cat, prompts] of Object.entries(promptData.promptsWithCat)) {
+              for (const p of prompts) {
+                const entryDoc = await getDoc(doc(db, `users/${currentUser.uid}/entries`, p));
+                if (!entryDoc.exists()) {
+                  setPrompt(p);
+                  setCategory(cat);
+                  foundPrompt = true;
+                  break;
+                }
               }
+              if (foundPrompt) break; // Exit outer loop if a prompt is found
             }
           } else {
-            setPrompt('Prompt is not array');
+            setPrompt('No prompts available');
+            setCategory(''); // Reset category
           }
         } else {
           console.error('No such document!');
           setPrompt('promptDoc does not exist');
+          setCategory(''); // Reset category
         }
 
-        // Fetch user's streak data
         const userDoc = await getDoc(doc(db, `users/${currentUser.uid}`));
-        console.log('User document:', userDoc);
         if (userDoc.exists()) {
           const userData = userDoc.data();
-          console.log('User data:', userData);
           setStreak(userData.streak || 0);
           const lastEntryDate = userData.lastEntryDate;
           const todayDate = getTodayDate();
@@ -62,13 +91,11 @@ const Journal = () => {
             const yesterday = new Date();
             yesterday.setDate(yesterday.getDate() - 1);
             const yesterdayDate = yesterday.toLocaleDateString('en-CA');
-            console.log('Yesterday date:', yesterdayDate);
-            console.log('Last entry date:', lastEntryDate);
 
             if (lastEntryDate === yesterdayDate) {
-              setStreakWarning('in jeopardy!'); // Display warning if they missed one day
+              setStreakWarning('in jeopardy!');
             } else {
-              setStreak(0); // Reset streak if they missed two days
+              setStreak(0);
             }
           }
         } else {
@@ -77,11 +104,15 @@ const Journal = () => {
       } catch (error) {
         console.error('Error fetching prompt:', error);
         setPrompt('Error loading prompt');
+        setCategory(''); // Reset category
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
+
     fetchPromptAndEntry();
-  }, [db, currentUser]);
+    fetchPastEntries();
+  }, [currentUser, db]);
 
   const handleSubmit = async () => {
     setSaving(true);
@@ -131,7 +162,12 @@ const Journal = () => {
           setStreakWarning('');
         }
   
-        alert('Entry saved successfully!');
+        setSaveMessage('Entry saved successfully! Loading next prompt...');
+        fetchPastEntries(); // Refresh past entries immediately after saving the entry
+        setTimeout(() => {
+          setSaveMessage('');
+          fetchNextPrompt(); // Fetch the next prompt after 3 seconds
+        }, 3000);
       }
     } catch (error) {
       console.error('Error:', error.message);
@@ -140,30 +176,162 @@ const Journal = () => {
     }
   };
 
+  const fetchNextPrompt = async () => {
+    setLoading(true);
+    try {
+      const promptDoc = await getDoc(doc(db, 'prompts', 'NHdNnSptRrnGvz4cW3sw'));
+      if (promptDoc.exists()) {
+        const promptData = promptDoc.data();
+        if (promptData.promptsWithCat) {
+          let foundPrompt = false;
+          for (const [cat, prompts] of Object.entries(promptData.promptsWithCat)) {
+            for (const p of prompts) {
+              const entryDoc = await getDoc(doc(db, `users/${currentUser.uid}/entries`, p));
+              if (!entryDoc.exists()) {
+                setPrompt(p);
+                setCategory(cat);
+                setEntry(''); // Clear the entry
+                foundPrompt = true;
+                break;
+              }
+            }
+            if (foundPrompt) break; // Exit outer loop if a prompt is found
+          }
+        } else {
+          setPrompt('No prompts available');
+          setCategory(''); // Reset category
+        }
+      } else {
+        console.error('No such document!');
+        setPrompt('promptDoc does not exist');
+        setCategory(''); // Reset category
+      }
+    } catch (error) {
+      console.error('Error fetching prompt:', error);
+      setPrompt('Error loading prompt');
+      setCategory(''); // Reset category
+    } finally {
+      setLoading(false);
+      fetchPastEntries(); // Refresh past entries after loading the next prompt
+    }
+  };
+
+  const handleTabClick = (tabName) => {
+    setActiveTab(tabName);
+  };
+
+  const handleEditClick = (id) => {
+    setPastEntries(pastEntries.map(entry => 
+      entry.id === id ? { ...entry, isEditing: true } : entry
+    ));
+  };
+
+  const handleSaveEdit = async (id, updatedEntry) => {
+    try {
+      const entryDocRef = doc(db, `users/${currentUser.uid}/entries`, id);
+      await updateDoc(entryDocRef, {
+        entry: updatedEntry,
+        timestamp: new Date(),
+      });
+      setPastEntries(pastEntries.map(entry => 
+        entry.id === id ? { ...entry, entry: updatedEntry, isEditing: false } : entry
+      ));
+    } catch (error) {
+      console.error('Error updating entry:', error);
+    }
+  };
+
+  const handleCancelEdit = (id) => {
+    setPastEntries(pastEntries.map(entry => 
+      entry.id === id ? { ...entry, isEditing: false } : entry
+    ));
+  };
+
   return (
     <div className="journal-container">
       <div className="header">
-        <h2>Journal</h2>
+        <h2 className="header-title">Journal</h2>
         <div className="streak" style={{ color: streakWarning ? 'red' : 'green' }}>
-          <FaFire />
+          <FaFire className="streak-icon" />
           {streak} day streak {streakWarning}
         </div>
       </div>
-      {loading ? (
-        <p>Loading...</p>
-      ) : (
-        <>
-          <p className="prompt">{prompt}</p>
-          <textarea
-            className="textarea"
-            value={entry}
-            onChange={(e) => setEntry(e.target.value)}
-          />
-          <button onClick={handleSubmit} disabled={saving}>
-            {saving ? 'Saving...' : 'Save Entry'}
-          </button>
-        </>
-      )}
+
+      <div className="tabs">
+        <button
+          className={`tab-button ${activeTab === 'Today’s Prompt' ? 'active' : ''}`}
+          onClick={() => handleTabClick('Today’s Prompt')}
+        >
+          Today’s Prompt
+        </button>
+        <button
+          className={`tab-button ${activeTab === 'Past Entries' ? 'active' : ''}`}
+          onClick={() => handleTabClick('Past Entries')}
+        >
+          Past Entries
+        </button>
+      </div>
+
+      <div className="content">
+        {activeTab === 'Today’s Prompt' && (
+          <div className="tab-content">
+            {loading ? (
+              <p className="loading-message">Loading...</p>
+            ) : (
+              <>
+                {category && <h3 className="category-header">{category}</h3>} {/* Display category */}
+                <p className="prompt">{prompt}</p>
+                <textarea
+                  className="textarea"
+                  value={entry}
+                  onChange={(e) => setEntry(e.target.value)}
+                  placeholder="Write your response here..."
+                />
+                <div className="save-container">
+                  <button className="save-button" onClick={handleSubmit} disabled={saving}>
+                    {saving ? 'Saving...' : 'Save Entry'}
+                  </button>
+                  {saveMessage && <span className="save-message">{saveMessage}</span>}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'Past Entries' && (
+          <div className="tab-content">
+            <h3 className="past-entries-title">Past Entries</h3>
+            {pastEntries.length === 0 ? (
+              <p className="no-entries-message">No past entries yet. Start journaling today!</p>
+            ) : (
+              pastEntries.map((entry) => (
+                <div key={entry.id} className="entry-card">
+                  {entry.isEditing ? (
+                    <>
+                      <textarea
+                        className="textarea"
+                        value={entry.entry}
+                        onChange={(e) => setPastEntries(pastEntries.map(pastEntry => 
+                          pastEntry.id === entry.id ? { ...pastEntry, entry: e.target.value } : pastEntry
+                        ))}
+                      />
+                      <button onClick={() => handleSaveEdit(entry.id, entry.entry)}>Save</button>
+                      <button onClick={() => handleCancelEdit(entry.id)}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <p className="entry-prompt">{entry.id}</p>
+                      <p className="entry-response">{entry.entry}</p>
+                      <p className="entry-timestamp">{entry.timestamp}</p>
+                      <button onClick={() => handleEditClick(entry.id)}>Edit</button>
+                    </>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
