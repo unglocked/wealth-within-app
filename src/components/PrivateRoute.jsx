@@ -5,11 +5,14 @@ import { AuthContext } from '../context/AuthContext';
 const PrivateRoute = ({ element }) => {
   const authContext = useContext(AuthContext);
 
-  if (!authContext || !authContext.currentUser) {
+  if (!authContext) {
+    console.error("AuthContext is undefined! Make sure AuthProvider is wrapping your app.");
     return <Navigate to="/login" />;
   }
 
-  return element;
+  const { currentUser } = authContext;
+
+  return currentUser ? element : <Navigate to="/login" />;
 };
 
 export default PrivateRoute;
