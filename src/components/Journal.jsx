@@ -1,14 +1,17 @@
 import React, { useState, useEffect, useContext } from 'react';
-import { getAuth } from 'firebase/auth';
 import { getFirestore, doc, getDoc, setDoc, collection, getDocs, updateDoc } from 'firebase/firestore';
 import { AuthContext } from '../context/AuthContext';
-import { FaFire } from 'react-icons/fa';
+import JournalHeader from './JournalHeader';
+import JournalTabs from './JournalTabs';
+import TodayPrompt from './TodayPrompt';
+import PastEntries from './PastEntries';
 import './Journal.css'; // Import the CSS file
 
 const Journal = () => {
   const { currentUser } = useContext(AuthContext);
   const [prompt, setPrompt] = useState('');
-  const [category, setCategory] = useState(''); // Add category state
+  const [category, setCategory] = useState('');
+  const [order, setOrder] = useState(null);
   const [entry, setEntry] = useState('');
   const [hasEntryToday, setHasEntryToday] = useState(false);
   const [streak, setStreak] = useState(0);
@@ -29,18 +32,20 @@ const Journal = () => {
     try {
       const entriesCollection = collection(db, `users/${currentUser.uid}/entries`);
       const entriesSnapshot = await getDocs(entriesCollection);
+      console.log("entriesSnapshot:", entriesSnapshot);
       const entriesList = entriesSnapshot.docs.map(doc => {
         const data = doc.data();
+        console.log("data:", data);
         const timestamp = data.timestamp ? data.timestamp.toDate() : null;
         const formattedTimestamp = timestamp
           ? `${timestamp.toLocaleDateString()} ${timestamp.toLocaleTimeString()}`
           : 'No timestamp';
-
         return {
           id: doc.id,
           ...data,
           timestamp: formattedTimestamp,
-          isEditing: false, // Add isEditing state to each entry
+          isEditing: false,
+          order: data.order || null,
         };
       });
       setPastEntries(entriesList);
@@ -56,28 +61,39 @@ const Journal = () => {
         const promptDoc = await getDoc(doc(db, 'prompts', 'NHdNnSptRrnGvz4cW3sw'));
         if (promptDoc.exists()) {
           const promptData = promptDoc.data();
-          if (promptData.promptsWithCat) {
-            let foundPrompt = false;
-            for (const [cat, prompts] of Object.entries(promptData.promptsWithCat)) {
-              for (const p of prompts) {
-                const entryDoc = await getDoc(doc(db, `users/${currentUser.uid}/entries`, p));
-                if (!entryDoc.exists()) {
-                  setPrompt(p);
-                  setCategory(cat);
-                  foundPrompt = true;
-                  break;
-                }
+          if (promptData.orderedPrompts) { // Use orderedPrompts instead of promptsWithCat
+            // Sort by order to ensure sequence
+            const sortedPrompts = promptData.orderedPrompts.sort((a, b) => a.order - b.order);
+            let foundUnenteredPrompt = false;
+
+            for (const promptObj of sortedPrompts) {
+              const entryDoc = await getDoc(doc(db, `users/${currentUser.uid}/entries`, promptObj.text));
+              if (!entryDoc.exists()) {
+                setPrompt(promptObj.text);
+                setCategory(promptObj.category);
+                setOrder(promptObj.order);
+                foundUnenteredPrompt = true;
+                break;
               }
-              if (foundPrompt) break; // Exit outer loop if a prompt is found
+            }
+
+            // If all prompts are entered, set the last prompt
+            if (!foundUnenteredPrompt && sortedPrompts.length > 0) {
+              const lastPromptObj = sortedPrompts[sortedPrompts.length - 1];
+              setPrompt(lastPromptObj.text);
+              setCategory(lastPromptObj.category);
+              setOrder(lastPromptObj.order);
             }
           } else {
             setPrompt('No prompts available');
-            setCategory(''); // Reset category
+            setCategory('');
+            setOrder(null);
           }
         } else {
           console.error('No such document!');
           setPrompt('promptDoc does not exist');
-          setCategory(''); // Reset category
+          setCategory('');
+          setOrder(null);
         }
 
         const userDoc = await getDoc(doc(db, `users/${currentUser.uid}`));
@@ -104,7 +120,8 @@ const Journal = () => {
       } catch (error) {
         console.error('Error fetching prompt:', error);
         setPrompt('Error loading prompt');
-        setCategory(''); // Reset category
+        setCategory('');
+        setOrder(null);
       } finally {
         setLoading(false);
       }
@@ -132,41 +149,40 @@ const Journal = () => {
             const yesterday = new Date();
             yesterday.setDate(yesterday.getDate() - 1);
             const yesterdayDate = yesterday.toLocaleDateString('en-CA');
-  
+
             if (lastEntryDate === yesterdayDate) {
-              newStreak += 1; // Increase streak if they journaled yesterday
+              newStreak += 1;
             } else {
-              newStreak = 1; // Reset streak if they missed a day
+              newStreak = 1;
             }
           }
         } else {
-          newStreak = 1; // First entry ever
+          newStreak = 1;
         }
-  
-        // Save journal entry
+
         const entryDocRef = doc(db, `users/${currentUser.uid}/entries`, prompt);
         await setDoc(entryDocRef, {
           entry,
           timestamp: new Date(),
+          order,
         });
-  
-        // Update streak **only if it's the first entry of the day**
+
         if (!hasEntryToday) {
           await setDoc(userDocRef, {
             streak: newStreak,
             lastEntryDate: todayDate,
           }, { merge: true });
-  
+
           setStreak(newStreak);
           setHasEntryToday(true);
           setStreakWarning('');
         }
-  
+
         setSaveMessage('Entry saved successfully! Loading next prompt...');
-        fetchPastEntries(); // Refresh past entries immediately after saving the entry
+        fetchPastEntries();
         setTimeout(() => {
           setSaveMessage('');
-          fetchNextPrompt(); // Fetch the next prompt after 3 seconds
+          fetchNextPrompt();
         }, 3000);
       }
     } catch (error) {
@@ -182,37 +198,47 @@ const Journal = () => {
       const promptDoc = await getDoc(doc(db, 'prompts', 'NHdNnSptRrnGvz4cW3sw'));
       if (promptDoc.exists()) {
         const promptData = promptDoc.data();
-        if (promptData.promptsWithCat) {
-          let foundPrompt = false;
-          for (const [cat, prompts] of Object.entries(promptData.promptsWithCat)) {
-            for (const p of prompts) {
-              const entryDoc = await getDoc(doc(db, `users/${currentUser.uid}/entries`, p));
-              if (!entryDoc.exists()) {
-                setPrompt(p);
-                setCategory(cat);
-                setEntry(''); // Clear the entry
-                foundPrompt = true;
-                break;
-              }
+        if (promptData.orderedPrompts) {
+          const sortedPrompts = promptData.orderedPrompts.sort((a, b) => a.order - b.order);
+          let foundUnenteredPrompt = false;
+
+          for (const promptObj of sortedPrompts) {
+            const entryDoc = await getDoc(doc(db, `users/${currentUser.uid}/entries`, promptObj.text));
+            if (!entryDoc.exists()) {
+              setPrompt(promptObj.text);
+              setCategory(promptObj.category);
+              setOrder(promptObj.order);
+              setEntry('');
+              foundUnenteredPrompt = true;
+              break;
             }
-            if (foundPrompt) break; // Exit outer loop if a prompt is found
+          }
+
+          if (!foundUnenteredPrompt && sortedPrompts.length > 0) {
+            const lastPromptObj = sortedPrompts[sortedPrompts.length - 1];
+            setPrompt(lastPromptObj.text);
+            setCategory(lastPromptObj.category);
+            setOrder(lastPromptObj.order);
           }
         } else {
           setPrompt('No prompts available');
-          setCategory(''); // Reset category
+          setCategory('');
+          setOrder(null);
         }
       } else {
         console.error('No such document!');
         setPrompt('promptDoc does not exist');
-        setCategory(''); // Reset category
+        setCategory('');
+        setOrder(null);
       }
     } catch (error) {
       console.error('Error fetching prompt:', error);
       setPrompt('Error loading prompt');
-      setCategory(''); // Reset category
+      setCategory('');
+      setOrder(null);
     } finally {
       setLoading(false);
-      fetchPastEntries(); // Refresh past entries after loading the next prompt
+      fetchPastEntries();
     }
   };
 
@@ -249,87 +275,30 @@ const Journal = () => {
 
   return (
     <div className="journal-container">
-      <div className="header">
-        <h2 className="header-title">Journal</h2>
-        <div className="streak" style={{ color: streakWarning ? 'red' : 'green' }}>
-          <FaFire className="streak-icon" />
-          {streak} day streak {streakWarning}
-        </div>
-      </div>
-
-      <div className="tabs">
-        <button
-          className={`tab-button ${activeTab === 'Today’s Prompt' ? 'active' : ''}`}
-          onClick={() => handleTabClick('Today’s Prompt')}
-        >
-          Today’s Prompt
-        </button>
-        <button
-          className={`tab-button ${activeTab === 'Past Entries' ? 'active' : ''}`}
-          onClick={() => handleTabClick('Past Entries')}
-        >
-          Past Entries
-        </button>
-      </div>
-
+      <JournalHeader streak={streak} streakWarning={streakWarning} />
+      <JournalTabs activeTab={activeTab} handleTabClick={handleTabClick} />
       <div className="content">
         {activeTab === 'Today’s Prompt' && (
-          <div className="tab-content">
-            {loading ? (
-              <p className="loading-message">Loading...</p>
-            ) : (
-              <>
-                {category && <h3 className="category-header">{category}</h3>} {/* Display category */}
-                <p className="prompt">{prompt}</p>
-                <textarea
-                  className="textarea"
-                  value={entry}
-                  onChange={(e) => setEntry(e.target.value)}
-                  placeholder="Write your response here..."
-                />
-                <div className="save-container">
-                  <button className="save-button" onClick={handleSubmit} disabled={saving}>
-                    {saving ? 'Saving...' : 'Save Entry'}
-                  </button>
-                  {saveMessage && <span className="save-message">{saveMessage}</span>}
-                </div>
-              </>
-            )}
-          </div>
+          <TodayPrompt
+            loading={loading}
+            category={category}
+            prompt={prompt}
+            order={order}
+            entry={entry}
+            setEntry={setEntry}
+            handleSubmit={handleSubmit}
+            saving={saving}
+            saveMessage={saveMessage}
+          />
         )}
-
         {activeTab === 'Past Entries' && (
-          <div className="tab-content">
-            <h3 className="past-entries-title">Past Entries</h3>
-            {pastEntries.length === 0 ? (
-              <p className="no-entries-message">No past entries yet. Start journaling today!</p>
-            ) : (
-              pastEntries.map((entry) => (
-                <div key={entry.id} className="entry-card">
-                  {entry.isEditing ? (
-                    <>
-                      <textarea
-                        className="textarea"
-                        value={entry.entry}
-                        onChange={(e) => setPastEntries(pastEntries.map(pastEntry => 
-                          pastEntry.id === entry.id ? { ...pastEntry, entry: e.target.value } : pastEntry
-                        ))}
-                      />
-                      <button onClick={() => handleSaveEdit(entry.id, entry.entry)}>Save</button>
-                      <button onClick={() => handleCancelEdit(entry.id)}>Cancel</button>
-                    </>
-                  ) : (
-                    <>
-                      <p className="entry-prompt">{entry.id}</p>
-                      <p className="entry-response">{entry.entry}</p>
-                      <p className="entry-timestamp">{entry.timestamp}</p>
-                      <button onClick={() => handleEditClick(entry.id)}>Edit</button>
-                    </>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
+          <PastEntries
+            pastEntries={pastEntries}
+            handleEditClick={handleEditClick}
+            handleSaveEdit={handleSaveEdit}
+            handleCancelEdit={handleCancelEdit}
+            setPastEntries={setPastEntries}
+          />
         )}
       </div>
     </div>
